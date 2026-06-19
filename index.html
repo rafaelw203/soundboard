@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <!-- viewport: sorgt dafür, dass die Seite auf dem iPhone scharf & richtig skaliert ist.
+       user-scalable=no = kein versehentliches Reinzoomen beim Tippen. -->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <!-- Diese zwei Zeilen machen die "Zum Home-Bildschirm"-App-Optik: Vollbild, keine Safari-Leiste -->
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="theme-color" content="#0a0e14">
+  <title>Soundboard</title>
+  <style>
+    /* ---- Quiet-Luxury / Cold-Palette: dunkles Blau-Grau, dezente Akzente ---- */
+    :root {
+      --bg: #0a0e14;
+      --panel: #131922;
+      --panel-2: #1b2330;
+      --ink: #e8edf4;
+      --muted: #7c8aa0;
+      --accent: #5b8dc9;   /* kühles Blau */
+      --accent-2: #7d6ea8; /* gedämpftes Violett */
+      --danger: #c96b6b;
+    }
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      /* safe-area-inset = Platz für die iPhone-Notch / Home-Indicator */
+      padding: env(safe-area-inset-top) 16px calc(env(safe-area-inset-bottom) + 16px);
+      min-height: 100vh;
+      user-select: none;
+    }
+    header {
+      display: flex; align-items: baseline; justify-content: space-between;
+      padding: 18px 4px 14px;
+    }
+    h1 { font-size: 22px; font-weight: 600; letter-spacing: 0.5px; margin: 0; }
+    .sub { color: var(--muted); font-size: 12px; }
+
+    /* Das Raster der Pads: passt sich automatisch an Bildschirmbreite an */
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 12px;
+    }
+    .pad {
+      position: relative;
+      aspect-ratio: 1 / 1;          /* immer quadratisch */
+      border: 1px solid #232c3a;
+      border-radius: 18px;
+      background: linear-gradient(160deg, var(--panel-2), var(--panel));
+      color: var(--ink);
+      font-size: 14px; font-weight: 500;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      gap: 6px;
+      cursor: pointer;
+      transition: transform 0.06s ease, box-shadow 0.2s ease;
+      overflow: hidden;
+    }
+    .pad .emoji { font-size: 28px; }
+    /* Wenn gedrückt: kurz "eindrücken" + Leuchten — haptisches Feedback fürs Auge */
+    .pad.active {
+      transform: scale(0.94);
+      box-shadow: 0 0 0 2px var(--accent), 0 0 24px -4px var(--accent);
+    }
+    .pad.custom { border-color: #2e3a4d; }
+    .pad .del {
+      position: absolute; top: 6px; right: 8px;
+      color: var(--muted); font-size: 16px; line-height: 1;
+      opacity: 0; transition: opacity 0.2s;
+    }
+    .pad.custom.editing .del { opacity: 1; }
+
+    .toolbar {
+      display: flex; gap: 10px; margin: 18px 0 8px;
+    }
+    .btn {
+      flex: 1; padding: 14px; border-radius: 14px; border: 1px solid #2a3444;
+      background: var(--panel); color: var(--ink); font-size: 14px; font-weight: 500;
+      cursor: pointer;
+    }
+    .btn.rec { border-color: var(--danger); color: var(--danger); }
+    .btn.rec.recording { background: var(--danger); color: #fff; animation: pulse 1s infinite; }
+    @keyframes pulse { 50% { opacity: 0.55; } }
+    .hint { color: var(--muted); font-size: 11px; text-align: center; margin-top: 14px; line-height: 1.5; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Soundboard</h1>
+    <span class="sub" id="status">tippen = abspielen</span>
+  </header>
+
+  <div class="grid" id="grid"></div>
+
+  <div class="toolbar">
+    <button class="btn" id="importBtn">+ Datei</button>
+    <button class="btn rec" id="recBtn">● Aufnehmen</button>
+    <button class="btn" id="editBtn">Bearbeiten</button>
+  </div>
+  <!-- unsichtbares Datei-Auswahlfeld; der schöne Button oben löst es aus.
+       accept="audio/*" = iOS/Mac zeigen nur Audiodateien an. multiple = mehrere auf einmal. -->
+  <input type="file" id="fileInput" accept="audio/*" multiple style="display:none">
+
+
+  <p class="hint">
+    iPhone: In Safari öffnen → Teilen-Symbol → „Zum Home-Bildschirm".<br>
+    Dann startet es wie eine echte App. Eigene Sounds bleiben gespeichert.
+  </p>
+
+  <script>
+  // =====================================================================
+  //  1) AUDIO-ENGINE — Sound aus reiner Mathematik (Web Audio API)
+  // =====================================================================
+  // AudioContext ist das "Mischpult" des Browsers. Wir erzeugen Töne live.
+  let audioCtx;
+  function ac() {
+    // Wird erst beim ersten Tippen erstellt — iOS erlaubt Audio nur nach
+    // einer echten Nutzer-Geste (Schutz gegen nervige Auto-Play-Seiten).
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    return audioCtx;
+  }
+
+  // Ein einzelner Ton: Frequenz, Dauer, Wellenform + sanftes Aus-Faden,
+  // damit es nicht "klickt". Das ist die Grundzelle aller Sounds.
+  function tone(freq, dur, type = 'sine', when = 0, gain = 0.3) {
+    const ctx = ac();
+    const osc = ctx.createOscillator();   // der Tongenerator
+    const g = ctx.createGain();           // die Lautstärke-Hüllkurve
+    osc.type = type;                      // sine/square/sawtooth/triangle = Klangfarbe
+    osc.frequency.value = freq;
+    const t0 = ctx.currentTime + when;
+    g.gain.setValueAtTime(gain, t0);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur); // weich ausblenden
+    osc.connect(g).connect(ctx.destination);
+    osc.start(t0); osc.stop(t0 + dur);
+  }
+
+  // Aus der tone()-Zelle bauen wir charakter-Sounds zusammen:
+  const synths = {
+    airhorn() { // typischer Reggae/Meme-Airhorn: zwei dichte Frequenzen, sägend
+      tone(330, 0.6, 'sawtooth', 0, 0.25);
+      tone(440, 0.6, 'sawtooth', 0, 0.2);
+      tone(330, 0.5, 'sawtooth', 0.7, 0.25);
+    },
+    bass() { // Bass-Drop: Frequenz rauscht nach unten
+      const ctx = ac(), o = ctx.createOscillator(), g = ctx.createGain();
+      o.type = 'sine'; o.frequency.setValueAtTime(180, ctx.currentTime);
+      o.frequency.exponentialRampToValueAtTime(35, ctx.currentTime + 0.8);
+      g.gain.setValueAtTime(0.5, ctx.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.9);
+      o.connect(g).connect(ctx.destination); o.start(); o.stop(ctx.currentTime + 0.9);
+    },
+    ding() { tone(880, 0.4, 'sine', 0, 0.3); tone(1320, 0.5, 'sine', 0.04, 0.15); },
+    blip() { tone(660, 0.08, 'square', 0, 0.2); tone(990, 0.08, 'square', 0.09, 0.2); },
+    scratch() { // Vinyl-Scratch: Rauschen, schnell moduliert
+      const ctx = ac(), buf = ctx.createBuffer(1, ctx.sampleRate * 0.3, ctx.sampleRate);
+      const d = buf.getChannelData(0);
+      for (let i = 0; i < d.length; i++) d[i] = (Math.random()*2-1) * Math.sin(i/40);
+      const src = ctx.createBufferSource(); src.buffer = buf;
+      const g = ctx.createGain(); g.gain.value = 0.3;
+      src.connect(g).connect(ctx.destination); src.start();
+    },
+    sad() { [440,392,349,330].forEach((f,i)=>tone(f,0.45,'triangle',i*0.28,0.25)); }, // sad-trombone
+    coin() { tone(988,0.08,'square',0,0.2); tone(1319,0.5,'square',0.08,0.2); },
+    error() { tone(200,0.15,'sawtooth',0,0.3); tone(150,0.25,'sawtooth',0.16,0.3); },
+  };
+
+  // =====================================================================
+  //  2) DIE PADS — fest eingebaut + deine eigenen aus dem Speicher
+  // =====================================================================
+  // Pads mit "src" spielen eine echte Datei; Pads mit "id" einen Synth-Sound.
+  const builtin = [
+    { id:'vineboom',  label:'Vine Boom', emoji:'💥', src:'sounds/vine-boom.mp3' },
+    { id:'rizz',      label:'Rizz',      emoji:'😮‍💨', src:'sounds/rizz-sound-effect.mp3' },
+    { id:'sbfail',    label:'SpongeBob', emoji:'🧽', src:'sounds/spongebob-fail.mp3' },
+    { id:'fart',      label:'Fart',      emoji:'💨', src:'sounds/dry-fart.mp3' },
+    { id:'applepay',  label:'Apple Pay', emoji:'🍏', src:'sounds/applepay.mp3' },
+  // ---- YouTube Shorts (deutsche Memes) ----
+    { id:'sh0', label:"Lüge", emoji:'🤥', src:'sounds/yt-luege.mp3' },
+    { id:'sh1', label:"Schlimmer", emoji:'😈', src:'sounds/yt-schlimmer.mp3' },
+    { id:'sh2', label:"Patsch", emoji:'👋', src:'sounds/yt-patsch.mp3' },
+    { id:'sh3', label:"Selo Abi", emoji:'🥂', src:'sounds/yt-selo-abi.mp3' },
+    { id:'sh4', label:"Oh My God", emoji:'😱', src:'sounds/yt-ohmygod.mp3' },
+    { id:'sh5', label:"Yeah Boy", emoji:'🤙', src:'sounds/yt-yeahboy.mp3' },
+  // ---- Top 40 TikTok Meme Sounds ----
+    { id:'c1', label:"God Damn!", emoji:'😇', src:'sounds/comp-01-god-damn.mp3' },
+    { id:'c2', label:"Spawn", emoji:'🎮', src:'sounds/comp-02-spawn.mp3' },
+    { id:'c3', label:"Metal Pipe Falling (Loud)", emoji:'🔧', src:'sounds/comp-03-metal-pipe-falling-loud.mp3' },
+    { id:'c4', label:"Undertakers Bell", emoji:'🔔', src:'sounds/comp-04-undertakers-bell.mp3' },
+    { id:'c5', label:"Travis Scott Meme", emoji:'🎤', src:'sounds/comp-05-travis-scott-meme.mp3' },
+    { id:'c6', label:"Mentality", emoji:'💪', src:'sounds/comp-06-mentality.mp3' },
+    { id:'c7', label:"PS2 Startup Screen", emoji:'🎮', src:'sounds/comp-07-ps2-startup-screen.mp3' },
+    { id:'c8', label:"French Meme", emoji:'🇫🇷', src:'sounds/comp-08-french-meme.mp3' },
+    { id:'c9', label:"Bass Drop", emoji:'🔊', src:'sounds/comp-09-bass-drop.mp3' },
+    { id:'c10', label:"Windows 95 Startup", emoji:'🪟', src:'sounds/comp-10-windows-95-startup.mp3' },
+    { id:'c11', label:"Windows XP Start", emoji:'🪟', src:'sounds/comp-11-windows-xp-start.mp3' },
+    { id:'c12', label:"Windows XP Shutdown", emoji:'🪟', src:'sounds/comp-12-windows-xp-shutdown.mp3' },
+    { id:'c13', label:"English OR Spanish", emoji:'🇪🇸', src:'sounds/comp-13-english-or-spanish.mp3' },
+    { id:'c14', label:"Flashbang", emoji:'💣', src:'sounds/comp-14-flashbang.mp3' },
+    { id:'c15', label:"999 Credit Score Siren", emoji:'🚨', src:'sounds/comp-15-999-credit-score-siren.mp3' },
+    { id:'c16', label:"Exaggerated Among Us", emoji:'🚀', src:'sounds/comp-16-exaggerated-among-us.mp3' },
+    { id:'c17', label:"Long Brain Fart", emoji:'🧠', src:'sounds/comp-17-long-brain-fart.mp3' },
+    { id:'c18', label:"Gay Echo Voice", emoji:'🌈', src:'sounds/comp-18-gay-echo-voice.mp3' },
+    { id:'c19', label:"Crowd Laugh", emoji:'😂', src:'sounds/comp-19-crowd-laugh.mp3' },
+    { id:'c20', label:"Get Out!", emoji:'🚪', src:'sounds/comp-20-get-out.mp3' },
+    { id:'c21', label:"Glass Breaking", emoji:'🔨', src:'sounds/comp-21-glass-breaking.mp3' },
+    { id:'c22', label:"RDR2 : Low Honor", emoji:'🤠', src:'sounds/comp-22-rdr2-low-honor.mp3' },
+    { id:'c23', label:"Grandma House", emoji:'👵', src:'sounds/comp-23-grandma-house.mp3' },
+    { id:'c24', label:"Collect Gold", emoji:'🪙', src:'sounds/comp-24-collect-gold.mp3' },
+    { id:'c25', label:"Slow Motion", emoji:'🐢', src:'sounds/comp-25-slow-motion.mp3' },
+    { id:'c26', label:"Spongebob Walking", emoji:'🧽', src:'sounds/comp-26-spongebob-walking.mp3' },
+    { id:'c27', label:"I Be Poppin Bottles", emoji:'🍾', src:'sounds/comp-27-i-be-poppin-bottles-boosted.mp3' },
+    { id:'c28', label:"Depressed Penguin", emoji:'🐧', src:'sounds/comp-28-depressed-penguin.mp3' },
+    { id:'c29', label:"Super Idol", emoji:'🎤', src:'sounds/comp-29-super-idol.mp3' },
+    { id:'c30', label:"Fortnite Shield", emoji:'🎮', src:'sounds/comp-30-fortnite-shield-potion.mp3' },
+    { id:'c31', label:"Don Pollo Ahh", emoji:'🐔', src:'sounds/comp-31-don-pollo-ahh-sound.mp3' },
+    { id:'c32', label:"Dark Piano Dexter", emoji:'🎹', src:'sounds/comp-32-dark-piano-dexter.mp3' },
+    { id:'c33', label:"Optimus Prime", emoji:'🤖', src:'sounds/comp-33-optimus-prime.mp3' },
+    { id:'c34', label:"Hells Kitchen", emoji:'🔥', src:'sounds/comp-34-hells-kitchen-suspense.mp3' },
+    { id:'c35', label:"Bone Crack", emoji:'🦴', src:'sounds/comp-35-bone-crack.mp3' },
+    { id:'c36', label:"Magic Spells", emoji:'✨', src:'sounds/comp-36-magic-spells.mp3' },
+    { id:'c37', label:"Laugh Toy World", emoji:'😂', src:'sounds/comp-37-laugh-toy-world-animation.mp3' },
+    { id:'c38', label:"You Are My Sunshine", emoji:'🌞', src:'sounds/comp-38-you-are-my-sunshine.mp3' },
+    { id:'c39', label:"Taco Bell", emoji:'🔔', src:'sounds/comp-39-taco-bell.mp3' },
+    { id:'c40', label:"Fahh", emoji:'💀', src:'sounds/comp-40-fahh.mp3' },
+    { id:'airhorn', label:'Airhorn', emoji:'📢' },
+    { id:'bass',    label:'Bass Drop', emoji:'🔊' },
+    { id:'scratch', label:'Scratch', emoji:'💿' },
+    { id:'ding',    label:'Ding', emoji:'🔔' },
+    { id:'coin',    label:'Coin', emoji:'🪙' },
+    { id:'sad',     label:'Sad', emoji:'🎺' },
+    { id:'blip',    label:'Blip', emoji:'👾' },
+    { id:'error',   label:'Error', emoji:'❌' },
+  ];
+
+  // localStorage = kleiner Speicher im Browser, der einen Reload überlebt.
+  // Hier liegen deine selbst aufgenommenen Sounds (als Text-codiertes Audio).
+  function loadCustom() {
+    try { return JSON.parse(localStorage.getItem('myCustomSounds') || '[]'); }
+    catch { return []; }
+  }
+  function saveCustom(arr) { localStorage.setItem('myCustomSounds', JSON.stringify(arr)); }
+
+  // Welche eingebauten Synth-Pads hat der Nutzer ausgeblendet?
+  function loadHidden() {
+    try { return JSON.parse(localStorage.getItem('hiddenBuiltins') || '[]'); }
+    catch { return []; }
+  }
+  function saveHidden(arr) { localStorage.setItem('hiddenBuiltins', JSON.stringify(arr)); }
+
+  let editing = false;
+  const grid = document.getElementById('grid');
+  const statusEl = document.getElementById('status');
+
+  function render() {
+    grid.innerHTML = '';
+    const hidden = loadHidden();
+    // eingebaute Pads (außer den ausgeblendeten) — im Edit-Modus mit ✕ zum Ausblenden
+    builtin.filter(p => !hidden.includes(p.id)).forEach(p => {
+      // src => echte MP3 abspielen; sonst => Synth-Sound erzeugen
+      const play = p.src ? () => { const a = new Audio(p.src); a.currentTime = 0; a.play(); } : () => synths[p.id]();
+      const pad = makePad(p.emoji, p.label, play);
+      if (editing) pad.classList.add('editing');
+      const del = document.createElement('span');
+      del.className = 'del'; del.textContent = '✕';
+      del.onclick = (e) => { e.stopPropagation(); const h = loadHidden(); h.push(p.id); saveHidden(h); render(); };
+      pad.appendChild(del);
+      grid.appendChild(pad);
+    });
+    // eigene Pads (importiert 🎵 oder aufgenommen 🎙️)
+    loadCustom().forEach((c, idx) => {
+      const pad = makePad(c.emoji || '🎙️', c.label, () => playDataUrl(c.data));
+      pad.classList.add('custom');
+      if (editing) pad.classList.add('editing');
+      const del = document.createElement('span');
+      del.className = 'del'; del.textContent = '✕';
+      del.onclick = (e) => { e.stopPropagation(); const a = loadCustom(); a.splice(idx,1); saveCustom(a); render(); };
+      pad.appendChild(del);
+      grid.appendChild(pad);
+    });
+  }
+
+  function makePad(emoji, label, onPlay) {
+    const el = document.createElement('button');
+    el.className = 'pad';
+    el.innerHTML = `<span class="emoji">${emoji}</span><span>${label}</span>`;
+    // Wir nutzen 'pointerdown' statt 'click' → reagiert sofort, ohne 300ms Verzögerung.
+    el.addEventListener('pointerdown', () => {
+      if (editing && el.classList.contains('custom')) return; // im Edit-Modus nicht abspielen
+      el.classList.add('active');
+      // Vibration (funktioniert auf Android; iOS ignoriert es still — schadet nicht)
+      if (navigator.vibrate) navigator.vibrate(15);
+      onPlay();
+      setTimeout(() => el.classList.remove('active'), 120);
+    });
+    return el;
+  }
+
+  // =====================================================================
+  //  3) AUFNAHME — eigene Sounds übers Mikro (MediaRecorder API)
+  // =====================================================================
+  let mediaRecorder, chunks = [];
+  const recBtn = document.getElementById('recBtn');
+
+  recBtn.addEventListener('click', async () => {
+    if (mediaRecorder && mediaRecorder.state === 'recording') { mediaRecorder.stop(); return; }
+    try {
+      // Fragt um Mikro-Erlaubnis. iOS zeigt einen System-Dialog.
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      mediaRecorder = new MediaRecorder(stream);
+      chunks = [];
+      mediaRecorder.ondataavailable = e => chunks.push(e.data);
+      mediaRecorder.onstop = async () => {
+        const blob = new Blob(chunks, { type: 'audio/webm' });
+        const dataUrl = await blobToDataUrl(blob); // in Text umwandeln zum Speichern
+        const label = prompt('Name für den Sound?', 'Mein Sound') || 'Sound';
+        const a = loadCustom(); a.push({ label, data: dataUrl }); saveCustom(a);
+        stream.getTracks().forEach(t => t.stop()); // Mikro wieder freigeben
+        recBtn.classList.remove('recording'); recBtn.textContent = '● Eigenen Sound aufnehmen';
+        statusEl.textContent = 'gespeichert ✓'; render();
+      };
+      mediaRecorder.start();
+      recBtn.classList.add('recording'); recBtn.textContent = '■ Stopp (nimmt auf…)';
+      statusEl.textContent = 'Aufnahme läuft…';
+    } catch (err) {
+      alert('Mikro nicht verfügbar: ' + err.message);
+    }
+  });
+
+  // Audio-Blob -> Daten-Text (damit es in localStorage passt)
+  function blobToDataUrl(blob) {
+    return new Promise(res => { const r = new FileReader(); r.onload = () => res(r.result); r.readAsDataURL(blob); });
+  }
+  // Gespeicherten Sound abspielen
+  function playDataUrl(dataUrl) { new Audio(dataUrl).play(); }
+
+  // =====================================================================
+  //  3b) IMPORT — fertige Audiodateien (MP3/WAV/M4A) als Pads laden
+  // =====================================================================
+  const fileInput = document.getElementById('fileInput');
+  // Schöner Button → klickt unsichtbares Datei-Feld an
+  document.getElementById('importBtn').addEventListener('click', () => fileInput.click());
+
+  fileInput.addEventListener('change', async (e) => {
+    const files = [...e.target.files];
+    const arr = loadCustom();
+    for (const file of files) {
+      const dataUrl = await blobToDataUrl(file);      // Datei -> speicherbarer Text
+      // Dateiname ohne Endung als Vorschlag-Label, gekürzt
+      const guess = file.name.replace(/\.[^.]+$/, '').slice(0, 14);
+      const label = prompt('Name für „' + file.name + '"?', guess) || guess;
+      arr.push({ label, data: dataUrl, emoji: '🎵' });
+    }
+    saveCustom(arr);
+    fileInput.value = '';                              // Reset, damit dieselbe Datei erneut wählbar ist
+    statusEl.textContent = files.length + ' importiert ✓';
+    render();
+  });
+
+  document.getElementById('editBtn').addEventListener('click', (e) => {
+    editing = !editing;
+    e.target.textContent = editing ? 'Fertig' : 'Bearbeiten';
+    statusEl.textContent = editing ? '✕ zum Löschen' : 'tippen = abspielen';
+    render();
+  });
+
+  render(); // App starten
+  </script>
+</body>
+</html>
