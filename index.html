@@ -244,7 +244,19 @@
     try { return JSON.parse(localStorage.getItem('myCustomSounds') || '[]'); }
     catch { return []; }
   }
-  function saveCustom(arr) { localStorage.setItem('myCustomSounds', JSON.stringify(arr)); }
+  // Gibt true zurück, wenn es geklappt hat. iOS-Safari (v.a. als Home-Screen-App)
+  // hat ein kleines localStorage-Limit (~5MB) — bei zu vielen/langen Aufnahmen
+  // schlägt setItem fehl, und ohne diesen try/catch ging der Sound bisher
+  // kommentarlos verloren bzw. blieb halb gespeichert.
+  function saveCustom(arr) {
+    try {
+      localStorage.setItem('myCustomSounds', JSON.stringify(arr));
+      return true;
+    } catch (err) {
+      alert('Speicher voll — Sound konnte nicht gespeichert werden. Bitte erst ein paar eigene Sounds löschen.');
+      return false;
+    }
+  }
 
   // Welche eingebauten Synth-Pads hat der Nutzer ausgeblendet?
   function loadHidden() {
@@ -312,14 +324,24 @@
     try {
       // Fragt um Mikro-Erlaubnis. iOS zeigt einen System-Dialog.
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      mediaRecorder = new MediaRecorder(stream);
+      // iOS/Safari nimmt nie wirklich WebM auf (meist audio/mp4) — vorher war
+      // 'audio/webm' hart eingetragen, egal was der Recorder wirklich liefert.
+      // Dadurch passte das im Data-URL-Header gespeicherte Format nicht zu den
+      // echten Bytes, und der Browser konnte die Aufnahme beim Abspielen nicht
+      // decodieren. Jetzt nehmen wir den ersten vom Gerät unterstützten Typ.
+      const preferredTypes = ['audio/mp4', 'audio/webm;codecs=opus', 'audio/webm', 'audio/ogg'];
+      const mimeType = preferredTypes.find(t => MediaRecorder.isTypeSupported(t));
+      mediaRecorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
       chunks = [];
       mediaRecorder.ondataavailable = e => chunks.push(e.data);
       mediaRecorder.onstop = async () => {
-        const blob = new Blob(chunks, { type: 'audio/webm' });
+        // mediaRecorder.mimeType statt eines fest eingetragenen Werts —
+        // das ist garantiert das Format, in dem tatsächlich aufgenommen wurde.
+        const blob = new Blob(chunks, { type: mediaRecorder.mimeType });
         const dataUrl = await blobToDataUrl(blob); // in Text umwandeln zum Speichern
         const label = prompt('Name für den Sound?', 'Mein Sound') || 'Sound';
-        const a = loadCustom(); a.push({ label, data: dataUrl }); saveCustom(a);
+        const a = loadCustom(); a.push({ label, data: dataUrl });
+        saveCustom(a);
         stream.getTracks().forEach(t => t.stop()); // Mikro wieder freigeben
         recBtn.classList.remove('recording'); recBtn.textContent = '● Eigenen Sound aufnehmen';
         statusEl.textContent = 'gespeichert ✓'; render();
